@@ -1,0 +1,17 @@
+node_modules
+.env
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzp
+*.pywp
+*.pywpz
+*.pywzp
+*.pywzpz
+*.pywzpzp

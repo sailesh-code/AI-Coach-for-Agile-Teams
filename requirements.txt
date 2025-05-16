@@ -1,0 +1,10 @@
+flask==2.0.1
+werkzeug==2.0.3
+flask-cors==3.0.10
+jira==3.5.1
+python-dotenv==0.19.0
+google-generativeai==0.3.0
+python-docx==0.8.11
+numpy==1.24.3
+pandas==2.0.3
+openpyxl==3.1.2 
