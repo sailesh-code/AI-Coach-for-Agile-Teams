@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 import google.generativeai as genai
 from datetime import datetime, timedelta
+import pytz
 import json
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
@@ -659,8 +660,79 @@ def analyze_sprint_churn(sprint_data):
     
     return churn_analysis
 
+def analyze_churned_stories(sprint_data):
+    """Analyze stories that were added to the sprint after it started."""
+    churned_stories = []
+    sprint_start = parse_jira_datetime(sprint_data['start_date'])
+    sprint_end = parse_jira_datetime(sprint_data['end_date'])
+    
+    if not sprint_start or not sprint_end:
+        raise Exception("Invalid sprint dates")
+    
+    # Ensure both sprint dates are timezone-aware
+    utc = pytz.UTC
+    if sprint_start.tzinfo is None:
+        sprint_start = utc.localize(sprint_start)
+    if sprint_end.tzinfo is None:
+        sprint_end = utc.localize(sprint_end)
+    
+    for story in sprint_data['stories']:
+        # Check changelog for sprint changes
+        for change in story['changelog']:
+            if change['field'] == 'Sprint':
+                change_date = parse_jira_datetime(change['date'])
+                if change_date:
+                    # Ensure change date is timezone-aware
+                    if change_date.tzinfo is None:
+                        change_date = utc.localize(change_date)
+                    
+                    if sprint_start <= change_date <= sprint_end:
+                        # Story was added to this sprint during the sprint
+                        churned_stories.append({
+                            'story_id': story['key'],
+                            'summary': story['summary'],
+                            'added_date': change['date'],
+                            'status': story['status'],
+                            'assignee': story['assignee'],
+                            'story_points': story['story_points'],
+                            'type': story['type']
+                        })
+    
+    # Calculate churn metrics
+    total_churned = len(churned_stories)
+    total_churned_points = sum(story['story_points'] for story in churned_stories if story['story_points'])
+    
+    churn_by_type = {
+        'Story': {
+            'count': len([s for s in churned_stories if s['type'] == 'Story']),
+            'points': sum(s['story_points'] for s in churned_stories if s['type'] == 'Story' and s['story_points'])
+        },
+        'Task': {
+            'count': len([s for s in churned_stories if s['type'] == 'Task']),
+            'points': sum(s['story_points'] for s in churned_stories if s['type'] == 'Task' and s['story_points'])
+        },
+        'Bug': {
+            'count': len([s for s in churned_stories if s['type'] == 'Bug']),
+            'points': sum(s['story_points'] for s in churned_stories if s['type'] == 'Bug' and s['story_points'])
+        }
+    }
+    
+    return {
+        'churned_stories': churned_stories,
+        'total_churned': total_churned,
+        'total_churned_points': total_churned_points,
+        'churn_by_type': churn_by_type,
+        'churn_summary': f"Total Churned Stories: {total_churned} ({total_churned_points} points)\n" +
+                        f"Stories: {churn_by_type['Story']['count']} ({churn_by_type['Story']['points']} points)\n" +
+                        f"Tasks: {churn_by_type['Task']['count']} ({churn_by_type['Task']['points']} points)\n" +
+                        f"Bugs: {churn_by_type['Bug']['count']} ({churn_by_type['Bug']['points']} points)"
+    }
+
 def generate_improvement_areas(structured_data, sprint_data):
     """Generate improvement areas using LLM based on structured data and sprint data."""
+    # First analyze churned stories
+    churn_analysis = analyze_churned_stories(sprint_data)
+    
     prompt = f"""
     Analyze the following sprint data and generate detailed improvement areas. Focus on:
     1. Spill-over Analysis
@@ -670,20 +742,21 @@ def generate_improvement_areas(structured_data, sprint_data):
        - Suggest preventive measures
     
     2. Churn Analysis
-       - Identify stories which were added during the sprint.
-       - Identify stories from changelog if their sprint number has changed to current sprint during the sprint.
-       - Analyze impact on sprint velocity if there are any churned stories.
-       - Suggest ways to reduce churn if there are any churned stories.
+       - Analyze the following churned stories that were added to the sprint after it started:
+       {json.dumps(churn_analysis, indent=2)}
+       - Identify all churned stories that were added to the sprint after it started.
+       - Analyze impact on sprint velocity considering both story count and story points
+       - Suggest ways to reduce churn based on the type and size of churned stories
     
     3. Team Utilization
        - Calculate utilization for each team member:
          * Get their story point capacity for the sprint
-         * Count total story points completed by them
+         * Count total story points completed by them, only consider the story points completed during the sprint. Do not consider the story points completed before the sprint start date and after the sprint end date. The story must be marked as done during the sprint.
          * Calculate utilization as: (completed story points / capacity) * 100
        - Consider a team member over-utilized if:
-         * They complete more story points than their capacity
+         * They complete more story points than their capacity, only consider the story points completed during the sprint. Do not consider the story points completed before the sprint start date and after the sprint end date. The story must be marked as done during the sprint.
        - Consider a team member under-utilized if:
-         * They handle less story points than their capacity
+         * They handle less story points than their capacity, only consider the story points completed during the sprint. Do not consider the story points completed before the sprint start date and after the sprint end date. The story must be marked as done during the sprint.
        - Analyze workload distribution
        - Suggest optimal resource allocation
     
@@ -715,6 +788,7 @@ def generate_improvement_areas(structured_data, sprint_data):
                 {{
                     "story_id": string,
                     "churn_count": number,
+                    "story_points": number,
                     "impact": string
                 }}
             ],
@@ -826,6 +900,7 @@ def generate_sprint_analysis_doc(sprint_data, improvement_areas):
             p = doc.add_paragraph()
             p.add_run(f'Story ID: {story["story_id"]}\n').bold = True
             p.add_run(f'Churn Count: {story["churn_count"]}\n')
+            p.add_run(f'Story Points: {story["story_points"]}\n')
             p.add_run(f'Impact: {story["impact"]}')
     else:
         doc.add_paragraph('No high churn stories identified in this sprint.')
