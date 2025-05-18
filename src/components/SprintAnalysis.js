@@ -20,13 +20,20 @@ import {
   InputLabel,
   Select,
   MenuItem,
-  Grid
+  Grid,
+  Card,
+  CardContent,
+  Stepper,
+  Step,
+  StepLabel
 } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import WarningIcon from '@mui/icons-material/Warning';
 import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import GroupIcon from '@mui/icons-material/Group';
 import LightbulbIcon from '@mui/icons-material/Lightbulb';
+import CloudUploadIcon from '@mui/icons-material/CloudUpload';
+import DescriptionIcon from '@mui/icons-material/Description';
 import axios from 'axios';
 
 function SprintAnalysis() {
@@ -38,10 +45,13 @@ function SprintAnalysis() {
   const [sprints, setSprints] = useState([]);
   const [selectedBoard, setSelectedBoard] = useState('');
   const [selectedSprint, setSelectedSprint] = useState('');
+  const [activeStep, setActiveStep] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [analysisResult, setAnalysisResult] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [isDownloading, setIsDownloading] = useState(false);
+
+  const steps = ['Select Board & Sprint', 'Upload Excel File', 'Generate Report'];
 
   useEffect(() => {
     fetchBoards();
@@ -85,13 +95,14 @@ function SprintAnalysis() {
     if (selectedFile && selectedFile.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
       setFile(selectedFile);
       setError(null);
+      setActiveStep(1);
     } else {
       setError('Please select a valid Excel file (.xlsx)');
       setFile(null);
     }
   };
 
-  const handleUpload = async () => {
+  const handleGenerateReport = async () => {
     if (!file) {
       setError('Please select a file first');
       return;
@@ -104,6 +115,7 @@ function SprintAnalysis() {
 
     setLoading(true);
     setError(null);
+    setActiveStep(2);
 
     const formData = new FormData();
     formData.append('file', file);
@@ -111,63 +123,30 @@ function SprintAnalysis() {
     formData.append('sprintId', selectedSprint);
 
     try {
-      const response = await axios.post('http://localhost:5000/api/sprint-analysis', formData, {
+      const response = await axios.post('http://localhost:5000/api/sprint-combined-report', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
+        responseType: 'blob'
       });
-      setAnalysis(response.data);
+
+      // Create a download link
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `sprint_report_and_analysis_${selectedSprint}.docx`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      
+      // Reset the form
+      setFile(null);
+      setActiveStep(0);
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to analyze sprint data');
+      setError(err.response?.data?.error || 'Failed to generate report');
+      setActiveStep(1);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleDownload = async () => {
-    if (!analysis) return;
-    
-    setIsDownloading(true);
-    try {
-      const response = await fetch('http://localhost:5000/api/sprint-analysis/download', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          sprint_data: {
-            sprint_name: analysis.sprint_name,
-            sprint_goal: analysis.sprint_goal,
-            start_date: analysis.start_date,
-            end_date: analysis.end_date
-          },
-          improvement_areas: analysis.improvement_areas
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to download document');
-      }
-
-      // Get the blob from the response
-      const blob = await response.blob();
-      
-      // Create a download link
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `sprint_analysis_${analysis.sprint_name}.docx`;
-      document.body.appendChild(a);
-      a.click();
-      
-      // Clean up
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-    } catch (error) {
-      console.error('Error downloading document:', error);
-      setError('Failed to download document. Please try again.');
-    } finally {
-      setIsDownloading(false);
     }
   };
 
@@ -370,87 +349,111 @@ function SprintAnalysis() {
     <Box sx={{ p: 3 }}>
       <Paper elevation={3} sx={{ p: 3, mb: 3 }}>
         <Typography variant="h5" gutterBottom>
-          Sprint Analysis
+          Sprint Report & Analysis
         </Typography>
-        <Typography variant="body1" paragraph>
-          Select a board and sprint, then upload your sprint capacity Excel file to analyze improvement areas, including spill-over analysis,
-          churn analysis, and team utilization.
-        </Typography>
+        
+        <Stepper activeStep={activeStep} sx={{ mb: 4 }}>
+          {steps.map((label) => (
+            <Step key={label}>
+              <StepLabel>{label}</StepLabel>
+            </Step>
+          ))}
+        </Stepper>
 
-        <Grid container spacing={2} sx={{ mb: 3 }}>
+        <Grid container spacing={3}>
           <Grid item xs={12} md={6}>
-            <FormControl fullWidth>
-              <InputLabel id="board-select-label">Select Board</InputLabel>
-              <Select
-                labelId="board-select-label"
-                id="board-select"
-                value={selectedBoard}
-                label="Select Board"
-                onChange={(e) => setSelectedBoard(e.target.value)}
-              >
-                {boards.map((board) => (
-                  <MenuItem key={board.id} value={board.id}>
-                    {board.name}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            <Card>
+              <CardContent>
+                <Typography variant="h6" gutterBottom>
+                  Board & Sprint Selection
+                </Typography>
+                <FormControl fullWidth sx={{ mb: 2 }}>
+                  <InputLabel id="board-select-label">Select Board</InputLabel>
+                  <Select
+                    labelId="board-select-label"
+                    id="board-select"
+                    value={selectedBoard}
+                    label="Select Board"
+                    onChange={(e) => setSelectedBoard(e.target.value)}
+                  >
+                    {boards.map((board) => (
+                      <MenuItem key={board.id} value={board.id}>
+                        {board.name}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <FormControl fullWidth>
+                  <InputLabel id="sprint-select-label">Select Sprint</InputLabel>
+                  <Select
+                    labelId="sprint-select-label"
+                    id="sprint-select"
+                    value={selectedSprint}
+                    label="Select Sprint"
+                    onChange={(e) => setSelectedSprint(e.target.value)}
+                    disabled={!selectedBoard}
+                  >
+                    {sprints.map((sprint) => (
+                      <MenuItem key={sprint.id} value={sprint.id}>
+                        {sprint.name} ({new Date(sprint.startDate).toLocaleDateString()} - {new Date(sprint.endDate).toLocaleDateString()})
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </CardContent>
+            </Card>
           </Grid>
+          
           <Grid item xs={12} md={6}>
-            <FormControl fullWidth>
-              <InputLabel id="sprint-select-label">Select Sprint</InputLabel>
-              <Select
-                labelId="sprint-select-label"
-                id="sprint-select"
-                value={selectedSprint}
-                label="Select Sprint"
-                onChange={(e) => setSelectedSprint(e.target.value)}
-                disabled={!selectedBoard}
-              >
-                {sprints.map((sprint) => (
-                  <MenuItem key={sprint.id} value={sprint.id}>
-                    {sprint.name} ({new Date(sprint.startDate).toLocaleDateString()} - {new Date(sprint.endDate).toLocaleDateString()})
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+            <Card>
+              <CardContent>
+                <Typography variant="h6" gutterBottom>
+                  Excel File Upload
+                </Typography>
+                <input
+                  accept=".xlsx"
+                  style={{ display: 'none' }}
+                  id="excel-file-upload"
+                  type="file"
+                  onChange={handleFileChange}
+                />
+                <label htmlFor="excel-file-upload">
+                  <Button
+                    variant="outlined"
+                    component="span"
+                    startIcon={<CloudUploadIcon />}
+                    fullWidth
+                    sx={{ mb: 2 }}
+                  >
+                    Select Excel File
+                  </Button>
+                </label>
+                {file && (
+                  <Chip
+                    label={file.name}
+                    onDelete={() => {
+                      setFile(null);
+                      setActiveStep(0);
+                    }}
+                    sx={{ width: '100%' }}
+                  />
+                )}
+              </CardContent>
+            </Card>
           </Grid>
         </Grid>
-        
-        <Box sx={{ mb: 2 }}>
-          <input
-            accept=".xlsx"
-            style={{ display: 'none' }}
-            id="excel-file-upload"
-            type="file"
-            onChange={handleFileChange}
-          />
-          <label htmlFor="excel-file-upload">
-            <Button
-              variant="outlined"
-              component="span"
-              sx={{ mr: 2 }}
-            >
-              Select Excel File
-            </Button>
-          </label>
-          {file && (
-            <Chip
-              label={file.name}
-              onDelete={() => setFile(null)}
-              sx={{ ml: 2 }}
-            />
-          )}
-        </Box>
 
-        <Button
-          variant="contained"
-          onClick={handleUpload}
-          disabled={!file || loading || !selectedBoard || !selectedSprint}
-          sx={{ mt: 2 }}
-        >
-          {loading ? <CircularProgress size={24} /> : 'Analyze Sprint'}
-        </Button>
+        <Box sx={{ mt: 3, textAlign: 'center' }}>
+          <Button
+            variant="contained"
+            onClick={handleGenerateReport}
+            disabled={!file || loading || !selectedBoard || !selectedSprint}
+            startIcon={loading ? <CircularProgress size={20} /> : <DescriptionIcon />}
+            size="large"
+          >
+            {loading ? 'Generating Report...' : 'Generate Report'}
+          </Button>
+        </Box>
 
         {error && (
           <Alert severity="error" sx={{ mt: 2 }}>
@@ -500,17 +503,6 @@ function SprintAnalysis() {
               {renderAdditionalImprovements(analysis.improvement_areas.additional_improvements)}
             </AccordionDetails>
           </Accordion>
-
-          <div className="analysis-header">
-            <h3>Sprint Analysis Results</h3>
-            <button 
-              className="download-button"
-              onClick={handleDownload}
-              disabled={isDownloading}
-            >
-              {isDownloading ? 'Downloading...' : 'Download Report'}
-            </button>
-          </div>
         </Paper>
       )}
     </Box>

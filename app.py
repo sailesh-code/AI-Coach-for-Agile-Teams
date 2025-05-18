@@ -404,12 +404,18 @@ def download_sprint_report():
             if story_numbers:
                 doc.add_paragraph(story_numbers)
             
+            # Add achievements subheading
+            doc.add_heading('Achievements', level=3)
+            
             # Add achievements
             for line in lines:
                 if line.startswith('- '):
                     p = doc.add_paragraph()
                     p.style = 'List Bullet'
                     p.add_run(line[2:])
+            
+            # Add a small space between subgoals
+            doc.add_paragraph()
         
         # Save the document to a BytesIO object
         doc_io = io.BytesIO()
@@ -728,6 +734,159 @@ def analyze_churned_stories(sprint_data):
                         f"Bugs: {churn_by_type['Bug']['count']} ({churn_by_type['Bug']['points']} points)"
     }
 
+def analyze_subgoal_improvements(stories, subgoal):
+    """Analyze improvement areas for a specific subgoal based on its stories."""
+    # Create a detailed prompt for analyzing stories under a subgoal
+    stories_text = "\n".join([
+        f"Story {story['key']}:\n"
+        f"Summary: {story['summary']}\n"
+        f"Description: {story['description']}\n"
+        f"Status: {story['status']}\n"
+        f"Comments: {len(story['comments'])} comments\n"
+        f"Changelog Entries: {len(story['changelog'])} entries\n"
+        f"Blockers: {len(story['blockers'])} blockers\n"
+        for story in stories
+    ])
+    
+    prompt = f"""
+    Analyze the following stories under this subgoal and identify specific improvement areas. Focus on concrete, actionable improvements based on:
+    1. Story Summary and Description
+       - Clarity and completeness
+       - Acceptance criteria
+       - Technical requirements
+    2. Status Changes
+       - Time spent in each status
+       - Status transition patterns
+    3. Comments
+       - Communication effectiveness
+       - Knowledge sharing
+       - Decision documentation
+    4. Changelog Entries
+       - Frequency of changes
+       - Types of changes
+       - Impact on delivery
+    5. Blockers
+       - Nature of blockers
+       - Resolution time
+       - Prevention opportunities
+
+    Subgoal: {subgoal}
+    
+    Stories:
+    {stories_text}
+    
+    For each improvement area, provide:
+    1. Specific observation from the data
+    2. Concrete impact on the sprint
+    3. Actionable recommendation
+    
+    Return the analysis in this format:
+    {{
+        "improvement_areas": [
+            {{
+                "category": "Story Definition/Status/Comments/Changelog/Blockers",
+                "observation": "Specific observation from the data",
+                "impact": "Concrete impact on the sprint",
+                "recommendation": "Actionable recommendation"
+            }}
+        ]
+    }}
+    
+    Important: 
+    - Be specific and data-driven
+    - Focus on concrete improvements, not general suggestions
+    - Base recommendations on actual patterns in the data
+    - Return ONLY the JSON object
+    """
+    
+    response = model.generate_content(prompt)
+    
+    # Clean the response text to ensure it's valid JSON
+    response_text = response.text.strip()
+    
+    # Remove any markdown code block indicators if present
+    if response_text.startswith('```json'):
+        response_text = response_text[7:]
+    if response_text.startswith('```'):
+        response_text = response_text[3:]
+    if response_text.endswith('```'):
+        response_text = response_text[:-3]
+        
+    response_text = response_text.strip()
+    
+    try:
+        return json.loads(response_text)
+    except json.JSONDecodeError as e:
+        # If JSON parsing fails, try to extract JSON from the response
+        import re
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                raise Exception(f"Failed to parse JSON from response: {str(e)}")
+        else:
+            raise Exception(f"Failed to extract JSON from response: {str(e)}")
+
+def calculate_spillover_points(sprint_data, spilled_stories):
+    """Calculate story points for stories that spilled over from the sprint."""
+    # Get sprint dates
+    sprint_start = parse_jira_datetime(sprint_data['start_date'])
+    sprint_end = parse_jira_datetime(sprint_data['end_date'])
+    
+    # Ensure both sprint dates are timezone-aware
+    utc = pytz.UTC
+    if sprint_start and sprint_start.tzinfo is None:
+        sprint_start = utc.localize(sprint_start)
+    if sprint_end and sprint_end.tzinfo is None:
+        sprint_end = utc.localize(sprint_end)
+    
+    total_spilled_points = 0
+    spilled_stories_with_points = []
+    
+    for story in spilled_stories:
+        story_id = story['story_id']
+        # Find the corresponding story in sprint_data
+        original_story = next((s for s in sprint_data['stories'] if s['key'] == story_id), None)
+        if not original_story:
+            continue
+            
+        # Check if story was in sprint at start
+        was_in_sprint_at_start = False
+        for change in original_story['changelog']:
+            change_date = parse_jira_datetime(change['date'])
+            if not change_date:
+                continue
+                
+            # Ensure change_date is timezone-aware
+            if change_date.tzinfo is None:
+                change_date = utc.localize(change_date)
+            
+            if change['field'] == 'Sprint' and change_date <= sprint_start:
+                was_in_sprint_at_start = True
+                break
+        
+        # If no sprint changes found, check creation date
+        if not was_in_sprint_at_start and not any(change['field'] == 'Sprint' for change in original_story['changelog']):
+            story_created = parse_jira_datetime(original_story['created'])
+            if story_created:
+                if story_created.tzinfo is None:
+                    story_created = utc.localize(story_created)
+                if story_created <= sprint_start:
+                    was_in_sprint_at_start = True
+        
+        # Only count points if story was in sprint at start
+        if was_in_sprint_at_start:
+            story_points = original_story.get('story_points', 0) or 0  # Convert None to 0
+            total_spilled_points += story_points
+            spilled_stories_with_points.append({
+                'story_id': story_id,
+                'story_points': story_points,
+                'reason': story['reason']
+            })
+    
+    return total_spilled_points, spilled_stories_with_points
+
 def generate_improvement_areas(structured_data, sprint_data):
     """Generate improvement areas using LLM based on structured data and sprint data."""
     # First analyze churned stories
@@ -858,12 +1017,253 @@ def generate_improvement_areas(structured_data, sprint_data):
         else:
             raise Exception(f"Failed to extract JSON from response: {str(e)}")
 
-def generate_sprint_analysis_doc(sprint_data, improvement_areas):
-    """Generate a Word document containing sprint analysis."""
+def calculate_sprint_metrics(sprint_data):
+    """Calculate sprint metrics including unassigned stories."""
+    # Get sprint dates
+    sprint_start = parse_jira_datetime(sprint_data['start_date'])
+    sprint_end = parse_jira_datetime(sprint_data['end_date'])
+    
+    # Ensure both sprint dates are timezone-aware
+    utc = pytz.UTC
+    if sprint_start and sprint_start.tzinfo is None:
+        sprint_start = utc.localize(sprint_start)
+    if sprint_end and sprint_end.tzinfo is None:
+        sprint_end = utc.localize(sprint_end)
+    
+    # Initialize metrics
+    metrics = {
+        'committed': 0,
+        'completed': 0
+    }
+    
+    for story in sprint_data['stories']:
+        story_points = story['story_points'] or 0
+        
+        # Track story status
+        was_in_sprint_at_start = False
+        was_completed_during_sprint = False
+        
+        # Check changelog to determine story status
+        for change in story['changelog']:
+            change_date = parse_jira_datetime(change['date'])
+            if not change_date:
+                continue
+                
+            # Ensure change_date is timezone-aware
+            if change_date.tzinfo is None:
+                change_date = utc.localize(change_date)
+            
+            # Check if story was in sprint at start
+            if change['field'] == 'Sprint':
+                if change_date <= sprint_start:
+                    was_in_sprint_at_start = True
+            
+            # Check if story was completed during sprint
+            if change['field'] == 'status' and change['to'] == 'Done':
+                if sprint_start <= change_date <= sprint_end:
+                    was_completed_during_sprint = True
+        
+        # If no sprint changes found, check creation date
+        if not any(change['field'] == 'Sprint' for change in story['changelog']):
+            story_created = parse_jira_datetime(story['created'])
+            if story_created:
+                if story_created.tzinfo is None:
+                    story_created = utc.localize(story_created)
+                if story_created <= sprint_start:
+                    was_in_sprint_at_start = True
+        
+        # Add to committed points if story was in sprint at start
+        if was_in_sprint_at_start:
+            metrics['committed'] += story_points
+        
+        # Add to completed points if story was completed during sprint
+        if was_completed_during_sprint:
+            metrics['completed'] += story_points
+    
+    return metrics
+
+def calculate_member_story_points(sprint_data):
+    """Calculate committed and completed story points for each team member."""
+    # Initialize member data
+    member_data = {}
+    
+    # Get sprint dates
+    sprint_start = parse_jira_datetime(sprint_data['start_date'])
+    sprint_end = parse_jira_datetime(sprint_data['end_date'])
+    
+    # Ensure both sprint dates are timezone-aware
+    utc = pytz.UTC
+    if sprint_start and sprint_start.tzinfo is None:
+        sprint_start = utc.localize(sprint_start)
+    if sprint_end and sprint_end.tzinfo is None:
+        sprint_end = utc.localize(sprint_end)
+    
+    for story in sprint_data['stories']:
+        assignee = story['assignee']
+        if not assignee:
+            continue
+            
+        # Initialize member data if not exists
+        if assignee not in member_data:
+            member_data[assignee] = {
+                'committed': 0,
+                'completed': 0
+            }
+            
+        story_points = story['story_points'] or 0
+        
+        # Track story status
+        was_in_sprint_at_start = False
+        was_completed_during_sprint = False
+        
+        # Check changelog to determine story status
+        for change in story['changelog']:
+            change_date = parse_jira_datetime(change['date'])
+            if not change_date:
+                continue
+                
+            # Ensure change_date is timezone-aware
+            if change_date.tzinfo is None:
+                change_date = utc.localize(change_date)
+            
+            # Check if story was in sprint at start
+            if change['field'] == 'Sprint':
+                if change_date <= sprint_start:
+                    was_in_sprint_at_start = True
+            
+            # Check if story was completed during sprint
+            if change['field'] == 'status' and change['to'] == 'Done':
+                if sprint_start <= change_date <= sprint_end:
+                    was_completed_during_sprint = True
+        
+        # If no sprint changes found, check creation date
+        if not any(change['field'] == 'Sprint' for change in story['changelog']):
+            story_created = parse_jira_datetime(story['created'])
+            if story_created:
+                if story_created.tzinfo is None:
+                    story_created = utc.localize(story_created)
+                if story_created <= sprint_start:
+                    was_in_sprint_at_start = True
+        
+        # Add to committed points if story was in sprint at start
+        if was_in_sprint_at_start:
+            member_data[assignee]['committed'] += story_points
+        
+        # Add to completed points if story was completed during sprint
+        if was_completed_during_sprint:
+            member_data[assignee]['completed'] += story_points
+    
+    return member_data
+
+def generate_member_capacity_table(structured_data, sprint_data):
+    """Generate a table showing member-wise capacity and utilization using LLM."""
+    try:
+        print("Starting member capacity table generation...")
+        
+        # Calculate story points for each member
+        member_points = calculate_member_story_points(sprint_data)
+        
+        # Prepare team capacity data
+        team_capacity = "\n".join([
+            f"Team Member: {member['name']}, Capacity: {member['capacity']} points"
+            for member in structured_data['team_members']
+        ])
+        
+        # Prepare member points data
+        member_points_text = "\n".join([
+            f"Member: {member}, Committed Points: {data['committed']}, Completed Points: {data['completed']}"
+            for member, data in member_points.items()
+        ])
+
+        # Create prompt for LLM
+        prompt = f"""
+        Generate a member-wise capacity table using the following data.
+        Consider the sprint period from {sprint_data['start_date']} to {sprint_data['end_date']}.
+
+        Team Capacity:
+        {team_capacity}
+
+        Calculated Story Points:
+        {member_points_text}
+
+        For each team member, calculate:
+        1. Use the provided committed and completed points
+        2. Calculate utilization: (Completed points / Capacity) * 100
+
+        Return the data in this JSON format:
+        {{
+            "members": [
+                {{
+                    "assignee": "string",
+                    "capacity": number,
+                    "committed": number,
+                    "completed": number,
+                    "utilization": "string (percentage with % symbol)"
+                }}
+            ]
+        }}
+
+        Important:
+        - Use the exact committed and completed points provided
+        - Calculate utilization based on the provided capacity
+        - Return ONLY the JSON object, with no additional text or explanation
+        """
+
+        print("Sending prompt to LLM...")
+        # Get response from LLM
+        response = model.generate_content(prompt)
+        print("Received response from LLM")
+        
+        # Clean the response text to ensure it's valid JSON
+        response_text = response.text.strip()
+        print(f"Raw LLM response: {response_text[:200]}...")  # Print first 200 chars
+        
+        # Remove any markdown code block indicators if present
+        if response_text.startswith('```json'):
+            response_text = response_text[7:]
+        if response_text.startswith('```'):
+            response_text = response_text[3:]
+        if response_text.endswith('```'):
+            response_text = response_text[:-3]
+            
+        response_text = response_text.strip()
+        print(f"Cleaned response text: {response_text[:200]}...")  # Print first 200 chars
+        
+        try:
+            # Parse the JSON response
+            result = json.loads(response_text)
+            print("Successfully parsed JSON response")
+            return result['members']
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {str(e)}")
+            # If JSON parsing fails, try to extract JSON from the response
+            import re
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                try:
+                    result = json.loads(json_match.group())
+                    print("Successfully extracted and parsed JSON from response")
+                    return result['members']
+                except json.JSONDecodeError as e2:
+                    print(f"Failed to parse extracted JSON: {str(e2)}")
+                    raise Exception(f"Failed to parse JSON from LLM response: {str(e2)}")
+            else:
+                print("No JSON object found in response")
+                raise Exception(f"Failed to extract JSON from LLM response: {str(e)}")
+    
+    except Exception as e:
+        import traceback
+        print(f"Error in generate_member_capacity_table: {str(e)}")
+        print("Full traceback:")
+        print(traceback.format_exc())
+        raise
+
+def generate_combined_sprint_doc(sprint_data, improvement_areas, subgoals, story_assignments, achievements, structured_data):
+    """Generate a Word document containing both sprint report and analysis."""
     doc = Document()
     
     # Add title
-    title = doc.add_heading(f'Sprint Analysis Report: {sprint_data["sprint_name"]}', 0)
+    title = doc.add_heading(f'Sprint Report & Analysis: {sprint_data["sprint_name"]}', 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
     # Add sprint details
@@ -872,15 +1272,159 @@ def generate_sprint_analysis_doc(sprint_data, improvement_areas):
     doc.add_paragraph(f'Start Date: {sprint_data["start_date"]}')
     doc.add_paragraph(f'End Date: {sprint_data["end_date"]}')
     
+    # Add Sprint Summary
+    doc.add_heading('Sprint Summary', level=1)
+    
+    # Calculate sprint metrics
+    # Sprint Capacity
+    total_capacity = sum(member.get('capacity', 0) or 0 for member in structured_data['team_members'])
+    
+    # Calculate total committed and completed points (including unassigned)
+    sprint_metrics = calculate_sprint_metrics(sprint_data)
+    total_committed = sprint_metrics['committed']
+    total_completed = sprint_metrics['completed']
+    
+    # Churn
+    churned_stories = improvement_areas['churn_analysis']['high_churn_stories']
+    total_churned = len(churned_stories)
+    total_churned_points = sum(story.get('story_points', 0) or 0 for story in churned_stories)
+    
+    # Spillover
+    spilled_stories = improvement_areas['spill_over_analysis']['spilled_stories']
+    total_spilled = len(spilled_stories)
+    total_spilled_points, spilled_stories_with_points = calculate_spillover_points(sprint_data, spilled_stories)
+    
+    # Add metrics table
+    table = doc.add_table(rows=1, cols=2)
+    table.style = 'Table Grid'
+    
+    # Add headers
+    header_cells = table.rows[0].cells
+    header_cells[0].text = 'Metric'
+    header_cells[1].text = 'Value'
+    
+    # Add metrics
+    metrics = [
+        ('Sprint Capacity', f'{total_capacity} points'),
+        ('Committed Story Points', f'{total_committed} points'),
+        ('Velocity', f'{total_completed} points'),
+        ('Churn', f'{total_churned} stories ({total_churned_points} points)'),
+        ('Spillover', f'{total_spilled} stories ({total_spilled_points} points)')
+    ]
+    
+    for metric, value in metrics:
+        row = table.add_row()
+        row.cells[0].text = metric
+        row.cells[1].text = value
+    
+    # Add Member Capacity Table
+    doc.add_heading('Team Member Capacity Analysis', level=1)
+    member_data = generate_member_capacity_table(structured_data, sprint_data)
+    
+    # Create member capacity table
+    member_table = doc.add_table(rows=1, cols=5)
+    member_table.style = 'Table Grid'
+    
+    # Add headers
+    header_cells = member_table.rows[0].cells
+    header_cells[0].text = 'Assignee'
+    header_cells[1].text = 'Capacity (Points)'
+    header_cells[2].text = 'Committed (Points)'
+    header_cells[3].text = 'Completed (Points)'
+    header_cells[4].text = 'Utilization'
+    
+    # Add member data
+    for member in member_data:
+        row = member_table.add_row()
+        row.cells[0].text = member['assignee']
+        row.cells[1].text = str(member.get('capacity', 0) or 0)
+        row.cells[2].text = str(member.get('committed', 0) or 0)
+        row.cells[3].text = str(member.get('completed', 0) or 0)
+        row.cells[4].text = member.get('utilization', '0%')
+    
+    # Add Sprint Report Section
+    doc.add_heading('Sprint Report', level=1)
+    
+    # Add subgoals and achievements
+    doc.add_heading('Sprint Goals and Achievements', level=2)
+    achievement_sections = achievements.split('\n\n')
+    for section in achievement_sections:
+        if not section.strip():
+            continue
+            
+        lines = section.split('\n')
+        if not lines:
+            continue
+            
+        # Add subgoal heading
+        subgoal_heading = doc.add_heading(lines[0], level=3)
+        
+        # Add story numbers if available
+        story_numbers = next((line for line in lines if line.startswith('Story Numbers:')), None)
+        if story_numbers:
+            doc.add_paragraph(story_numbers)
+            
+            # Extract story IDs from the story numbers line
+            story_ids = [s.strip() for s in story_numbers.replace('Story Numbers:', '').split(',')]
+            
+            # Get stories for this subgoal
+            subgoal_stories = [s for s in sprint_data['stories'] if s['key'] in story_ids]
+            
+            # Analyze improvements for this subgoal
+            improvements = analyze_subgoal_improvements(subgoal_stories, lines[0])
+        
+        # Add achievements subheading
+        doc.add_heading('Achievements', level=4)
+        
+        # Add achievements
+        for line in lines:
+            if line.startswith('- '):
+                p = doc.add_paragraph()
+                p.style = 'List Bullet'
+                p.add_run(line[2:])
+        
+        # Add improvement areas if available
+        if story_numbers and improvements.get('improvement_areas'):
+            doc.add_heading('Improvement Areas', level=4)
+            
+            # Group improvements by category
+            improvements_by_category = {}
+            for imp in improvements['improvement_areas']:
+                category = imp['category']
+                if category not in improvements_by_category:
+                    improvements_by_category[category] = []
+                improvements_by_category[category].append(imp)
+            
+            # Add improvements by category
+            for category, category_improvements in improvements_by_category.items():
+                doc.add_heading(category, level=5)
+                for imp in category_improvements:
+                    p = doc.add_paragraph()
+                    p.add_run('Observation: ').bold = True
+                    p.add_run(imp['observation'])
+                    p = doc.add_paragraph()
+                    p.add_run('Impact: ').bold = True
+                    p.add_run(imp['impact'])
+                    p = doc.add_paragraph()
+                    p.add_run('Recommendation: ').bold = True
+                    p.add_run(imp['recommendation'])
+                    doc.add_paragraph()  # Add spacing between improvements
+        
+        # Add a small space between subgoals
+        doc.add_paragraph()
+    
+    # Add Sprint Analysis Section
+    doc.add_heading('Sprint Analysis', level=1)
+    
     # Add Spill-over Analysis
-    doc.add_heading('Spill-over Analysis', level=1)
-    if improvement_areas['spill_over_analysis']['spilled_stories']:
+    doc.add_heading('Spill-over Analysis', level=2)
+    if spilled_stories_with_points:
         doc.add_paragraph('Spilled Stories:')
-        for story in improvement_areas['spill_over_analysis']['spilled_stories']:
+        for story in spilled_stories_with_points:
             p = doc.add_paragraph()
             p.add_run(f'Story ID: {story["story_id"]}\n').bold = True
-            p.add_run(f'Reason: {story["reason"]}\n')
-            p.add_run(f'Prevention Suggestion: {story["prevention_suggestion"]}')
+            p.add_run(f'Story Points: {story["story_points"]}\n')
+            p.add_run(f'Reason: {story["reason"]}')
     else:
         doc.add_paragraph('No stories spilled over in this sprint.')
     
@@ -893,15 +1437,24 @@ def generate_sprint_analysis_doc(sprint_data, improvement_areas):
         doc.add_paragraph(rec, style='List Bullet')
     
     # Add Churn Analysis
-    doc.add_heading('Churn Analysis', level=1)
+    doc.add_heading('Churn Analysis', level=2)
     if improvement_areas['churn_analysis']['high_churn_stories']:
-        doc.add_paragraph('High Churn Stories:')
+        # Add churn summary table
+        churn_table = doc.add_table(rows=1, cols=3)
+        churn_table.style = 'Table Grid'
+        
+        # Add headers
+        header_cells = churn_table.rows[0].cells
+        header_cells[0].text = 'Story ID'
+        header_cells[1].text = 'Story Points'
+        header_cells[2].text = 'Impact'
+        
+        # Add churned stories
         for story in improvement_areas['churn_analysis']['high_churn_stories']:
-            p = doc.add_paragraph()
-            p.add_run(f'Story ID: {story["story_id"]}\n').bold = True
-            p.add_run(f'Churn Count: {story["churn_count"]}\n')
-            p.add_run(f'Story Points: {story["story_points"]}\n')
-            p.add_run(f'Impact: {story["impact"]}')
+            row = churn_table.add_row()
+            row.cells[0].text = story['story_id']
+            row.cells[1].text = str(story.get('story_points', 0) or 0)
+            row.cells[2].text = story.get('impact', '')
     else:
         doc.add_paragraph('No high churn stories identified in this sprint.')
     
@@ -912,31 +1465,34 @@ def generate_sprint_analysis_doc(sprint_data, improvement_areas):
         doc.add_paragraph(suggestion, style='List Bullet')
     
     # Add Team Utilization
-    doc.add_heading('Team Utilization', level=1)
+    doc.add_heading('Team Utilization', level=2)
     
-    doc.add_heading('Over-Utilized Team Members', level=2)
-    if improvement_areas['team_utilization']['over_utilized']:
-        for member in improvement_areas['team_utilization']['over_utilized']:
-            p = doc.add_paragraph()
-            p.add_run(f'Member: {member["member"]}\n').bold = True
-            p.add_run(f'Capacity: {member["capacity"]} points\n')
-            p.add_run(f'Completed Points: {member["completed_points"]}\n')
-            p.add_run(f'Utilization: {member["utilization"]}%\n')
-            p.add_run(f'Suggestion: {member["suggestion"]}')
-    else:
-        doc.add_paragraph('No over-utilized team members identified.')
+    # Add utilization summary table
+    util_table = doc.add_table(rows=1, cols=4)
+    util_table.style = 'Table Grid'
     
-    doc.add_heading('Under-Utilized Team Members', level=2)
-    if improvement_areas['team_utilization']['under_utilized']:
-        for member in improvement_areas['team_utilization']['under_utilized']:
-            p = doc.add_paragraph()
-            p.add_run(f'Member: {member["member"]}\n').bold = True
-            p.add_run(f'Capacity: {member["capacity"]} points\n')
-            p.add_run(f'Completed Points: {member["completed_points"]}\n')
-            p.add_run(f'Utilization: {member["utilization"]}%\n')
-            p.add_run(f'Suggestion: {member["suggestion"]}')
-    else:
-        doc.add_paragraph('No under-utilized team members identified.')
+    # Add headers
+    header_cells = util_table.rows[0].cells
+    header_cells[0].text = 'Team Member'
+    header_cells[1].text = 'Capacity'
+    header_cells[2].text = 'Completed Points'
+    header_cells[3].text = 'Utilization'
+    
+    # Add over-utilized members
+    for member in improvement_areas['team_utilization']['over_utilized']:
+        row = util_table.add_row()
+        row.cells[0].text = member['member']
+        row.cells[1].text = str(member.get('capacity', 0) or 0)
+        row.cells[2].text = str(member.get('completed_points', 0) or 0)
+        row.cells[3].text = f"{member.get('utilization', 0)}%"
+    
+    # Add under-utilized members
+    for member in improvement_areas['team_utilization']['under_utilized']:
+        row = util_table.add_row()
+        row.cells[0].text = member['member']
+        row.cells[1].text = str(member.get('capacity', 0) or 0)
+        row.cells[2].text = str(member.get('completed_points', 0) or 0)
+        row.cells[3].text = f"{member.get('utilization', 0)}%"
     
     doc.add_paragraph(f'Workload Distribution: {improvement_areas["team_utilization"]["workload_distribution"]}')
     
@@ -945,7 +1501,7 @@ def generate_sprint_analysis_doc(sprint_data, improvement_areas):
         doc.add_paragraph(suggestion, style='List Bullet')
     
     # Add Additional Improvements
-    doc.add_heading('Additional Improvements', level=1)
+    doc.add_heading('Additional Improvements', level=2)
     for improvement in improvement_areas['additional_improvements']:
         p = doc.add_paragraph()
         p.add_run(f'Area: {improvement["area"]}\n').bold = True
@@ -954,60 +1510,47 @@ def generate_sprint_analysis_doc(sprint_data, improvement_areas):
     
     return doc
 
-@app.route('/api/sprint-analysis/download', methods=['POST'])
-def download_sprint_analysis():
+@app.route('/api/sprint-combined-report', methods=['POST'])
+def generate_combined_report():
     try:
-        data = request.get_json()
-        if not data or 'sprint_data' not in data or 'improvement_areas' not in data:
-            return jsonify({'error': 'Invalid request data'}), 400
+        print("Starting combined report generation...")
         
-        # Generate Word document
-        doc = generate_sprint_analysis_doc(data['sprint_data'], data['improvement_areas'])
-        
-        # Save to BytesIO
-        doc_io = io.BytesIO()
-        doc.save(doc_io)
-        doc_io.seek(0)
-        
-        return send_file(
-            doc_io,
-            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            as_attachment=True,
-            download_name=f'sprint_analysis_{data["sprint_data"]["sprint_name"]}.docx'
-        )
-    
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/sprint-analysis', methods=['POST'])
-def analyze_sprint():
-    try:
         if 'file' not in request.files:
+            print("No file in request")
             return jsonify({'error': 'No file provided'}), 400
         
         board_id = request.form.get('boardId')
         sprint_id = request.form.get('sprintId')
         
+        print(f"Received board_id: {board_id}, sprint_id: {sprint_id}")
+        
         if not board_id or not sprint_id:
+            print("Missing board_id or sprint_id")
             return jsonify({'error': 'Board ID and Sprint ID are required'}), 400
         
         excel_file = request.files['file']
         if not excel_file.filename.endswith(('.xlsx', '.xls')):
+            print(f"Invalid file format: {excel_file.filename}")
             return jsonify({'error': 'Invalid file format. Please upload an Excel file.'}), 400
         
+        print("Getting Jira client...")
         # Get sprint details
         jira_client = get_jira_client()
         sprint = jira_client.sprint(sprint_id)
         if not sprint:
+            print(f"Sprint not found: {sprint_id}")
             return jsonify({'error': 'Sprint not found'}), 404
         
+        print("Getting sprint stories...")
         # Get sprint stories with all details
         sprint_stories = get_sprint_stories(jira_client, sprint_id)
         
+        print("Processing Excel data...")
         # Process Excel data
         structured_data = process_excel_data(excel_file)
         
-        # Generate improvement areas using both Excel data and sprint stories
+        print("Generating sprint data...")
+        # Generate sprint data
         sprint_data = {
             'sprint_name': sprint.name,
             'sprint_goal': sprint.goal if hasattr(sprint, 'goal') else None,
@@ -1016,18 +1559,54 @@ def analyze_sprint():
             'stories': sprint_stories
         }
         
+        print("Generating subgoals...")
+        # Generate subgoals and achievements
+        subgoals = generate_subgoals(sprint_data['sprint_goal'])
+        
+        print("Assigning stories to subgoals...")
+        story_assignments = assign_stories_to_subgoals(sprint_stories, subgoals)
+        
+        print("Generating achievements...")
+        achievements = generate_achievements(sprint_stories, subgoals)
+        
+        print("Generating improvement areas...")
+        # Generate improvement areas
         improvement_areas = generate_improvement_areas(structured_data, sprint_data)
         
-        return jsonify({
-            'sprint_name': sprint.name,
-            'sprint_goal': sprint.goal if hasattr(sprint, 'goal') else None,
-            'start_date': sprint.startDate,
-            'end_date': sprint.endDate,
-            'structured_data': structured_data,
-            'improvement_areas': improvement_areas
-        })
+        print("Generating combined document...")
+        try:
+            # Generate combined document
+            doc = generate_combined_sprint_doc(
+                sprint_data,
+                improvement_areas,
+                subgoals,
+                story_assignments,
+                achievements,
+                structured_data
+            )
+        except Exception as doc_error:
+            print(f"Error in generate_combined_sprint_doc: {str(doc_error)}")
+            raise
+        
+        print("Saving document...")
+        # Save to BytesIO
+        doc_io = io.BytesIO()
+        doc.save(doc_io)
+        doc_io.seek(0)
+        
+        print("Sending file...")
+        return send_file(
+            doc_io,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            as_attachment=True,
+            download_name=f'sprint_report_and_analysis_{sprint.name}.docx'
+        )
     
     except Exception as e:
+        import traceback
+        print(f"Error generating combined report: {str(e)}")
+        print("Full traceback:")
+        print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
