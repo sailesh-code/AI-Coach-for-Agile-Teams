@@ -258,8 +258,11 @@ def generate_achievements(stories, subgoals):
     ])
     
     prompt = f"""
-    Analyze the following stories and their assignments to subgoals. For each subgoal, identify key achievements.
-    Focus on completed tasks, technical achievements, improvements, and measurable results.
+    Analyze the following stories and their assignments to subgoals. For each subgoal, identify ONLY the 2-3 most significant achievements.
+    Focus on:
+    1. Completed deliverables with measurable impact
+    2. Technical milestones that enable future work
+    3. Critical improvements that solve key problems
     
     Subgoals:
     {subgoals}
@@ -267,23 +270,21 @@ def generate_achievements(stories, subgoals):
     Stories:
     {stories_text}
     
-    For each subgoal, list key achievements as bullet points.
-    For each subgoal, list all the assigned stories as story numbers from subgoals variable.
+    For each subgoal, list ONLY the 2-3 most important achievements as bullet points.
+    For each subgoal, list all the assigned stories as story numbers.
     Format exactly like this:
     Subgoal 1:
     Story Numbers: STORY-123, STORY-456
-    - First achievement
-    - Second achievement
-    - Third achievement
+    - First achievement (be specific and measurable)
+    - Second achievement (focus on impact)
+    - Third achievement (if truly significant)
     
-    Subgoal 2:
-    Story Numbers: STORY-789
-    - First achievement
-    - Second achievement
-    - Third achievement
-    
-    Important: Each achievement should be a complete sentence starting with a capital letter.
-    Do not number the achievements or add any additional formatting.
+    Important: 
+    - Each achievement must be specific and measurable
+    - Focus on completed work with clear impact
+    - Do not include general or vague statements
+    - Do not number the achievements
+    - Do not add any additional formatting
     """
     
     response = model.generate_content(prompt)
@@ -540,11 +541,8 @@ def parse_jira_datetime(datetime_str):
     """Parse Jira datetime string to datetime object."""
     try:
         if not datetime_str:
-            print("Empty datetime string received")
             return None
             
-        print(f"Parsing datetime: {datetime_str}")
-        
         # Handle different Jira datetime formats
         if '+' in datetime_str:
             # Format: 2025-05-16T15:38:57.738+0530
@@ -560,10 +558,8 @@ def parse_jira_datetime(datetime_str):
             # Format: 2025-05-16T15:38:57.738
             dt = datetime.fromisoformat(datetime_str)
             
-        print(f"Successfully parsed datetime: {dt}")
         return dt
     except Exception as e:
-        print(f"Error parsing datetime {datetime_str}: {str(e)}")
         return None
 
 def analyze_sprint_churn(sprint_data):
@@ -749,54 +745,50 @@ def analyze_subgoal_improvements(stories, subgoal):
     ])
     
     prompt = f"""
-    Analyze the following stories under this subgoal and identify specific improvement areas. Focus on concrete, actionable improvements based on:
-    1. Story Summary and Description
-       - Clarity and completeness
-       - Acceptance criteria
-       - Technical requirements
-    2. Status Changes
+    Analyze the following stories under this subgoal and identify ONLY the top 2-3 most critical improvement areas. Focus on the most impactful improvements that would make the biggest difference.
+
+    Consider these aspects when identifying improvements:
+    1. Story Definition and Clarity
+       - Clarity and completeness of requirements
+       - Acceptance criteria quality
+       - Technical requirements specification
+    2. Status Changes and Progress
        - Time spent in each status
        - Status transition patterns
-    3. Comments
+       - Blocking issues
+    3. Communication and Documentation
        - Communication effectiveness
        - Knowledge sharing
        - Decision documentation
-    4. Changelog Entries
-       - Frequency of changes
-       - Types of changes
-       - Impact on delivery
-    5. Blockers
-       - Nature of blockers
-       - Resolution time
-       - Prevention opportunities
+    4. Technical Implementation
+       - Code quality
+       - Testing coverage
+       - Technical debt
 
     Subgoal: {subgoal}
     
     Stories:
     {stories_text}
     
-    For each improvement area, provide:
-    1. Specific observation from the data
-    2. Concrete impact on the sprint
-    3. Actionable recommendation
+    Return ONLY the top 2-3 most critical improvement areas as concise, actionable bullet points. Each point should combine the observation, impact, and recommendation into a single clear statement.
     
-    Return the analysis in this format:
+    Return the analysis in this exact JSON format:
     {{
         "improvement_areas": [
-            {{
-                "category": "Story Definition/Status/Comments/Changelog/Blockers",
-                "observation": "Specific observation from the data",
-                "impact": "Concrete impact on the sprint",
-                "recommendation": "Actionable recommendation"
-            }}
+            "First most critical improvement",
+            "Second most critical improvement",
+            "Third most critical improvement (only if truly significant)"
         ]
     }}
     
     Important: 
-    - Be specific and data-driven
-    - Focus on concrete improvements, not general suggestions
-    - Base recommendations on actual patterns in the data
+    - Return ONLY 2-3 most critical improvements
+    - Focus on improvements that would have the biggest impact
+    - Keep each point concise and actionable
+    - Combine observation, impact, and recommendation into single statements
     - Return ONLY the JSON object
+    - Ensure the JSON is properly formatted with double quotes
+    - Do not include any additional text or explanation
     """
     
     response = model.generate_content(prompt)
@@ -815,18 +807,40 @@ def analyze_subgoal_improvements(stories, subgoal):
     response_text = response_text.strip()
     
     try:
-        return json.loads(response_text)
+        # Try to parse the JSON directly
+        result = json.loads(response_text)
+        # Ensure we only return 2-3 improvements
+        if len(result['improvement_areas']) > 3:
+            result['improvement_areas'] = result['improvement_areas'][:3]
+        return result
     except json.JSONDecodeError as e:
-        # If JSON parsing fails, try to extract JSON from the response
+        print(f"Initial JSON parsing failed: {str(e)}")
+        print(f"Raw response: {response_text}")
+        
+        # If direct parsing fails, try to extract JSON from the response
         import re
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if json_match:
             try:
-                return json.loads(json_match.group())
-            except json.JSONDecodeError:
-                raise Exception(f"Failed to parse JSON from response: {str(e)}")
+                extracted_json = json_match.group()
+                # Clean up any potential formatting issues
+                extracted_json = extracted_json.replace('\n', ' ').replace('\r', '')
+                extracted_json = re.sub(r',\s*}', '}', extracted_json)  # Remove trailing commas
+                extracted_json = re.sub(r',\s*]', ']', extracted_json)  # Remove trailing commas in arrays
+                result = json.loads(extracted_json)
+                # Ensure we only return 2-3 improvements
+                if len(result['improvement_areas']) > 3:
+                    result['improvement_areas'] = result['improvement_areas'][:3]
+                return result
+            except json.JSONDecodeError as e2:
+                print(f"Extracted JSON parsing failed: {str(e2)}")
+                print(f"Extracted JSON: {extracted_json}")
+                # Return a default structure if parsing fails
+                return {"improvement_areas": ["Failed to parse improvement areas"]}
         else:
-            raise Exception(f"Failed to extract JSON from response: {str(e)}")
+            print("No JSON object found in response")
+            # Return a default structure if no JSON found
+            return {"improvement_areas": ["Failed to extract improvement areas"]}
 
 def calculate_spillover_points(sprint_data, spilled_stories):
     """Calculate story points for stories that spilled over from the sprint."""
@@ -908,16 +922,31 @@ def generate_improvement_areas(structured_data, sprint_data):
        - Suggest ways to reduce churn based on the type and size of churned stories
     
     3. Team Utilization
-       - Calculate utilization for each team member:
-         * Get their story point capacity for the sprint
-         * Count total story points completed by them, only consider the story points completed during the sprint. Do not consider the story points completed before the sprint start date and after the sprint end date. The story must be marked as done during the sprint.
-         * Calculate utilization as: (completed story points / capacity) * 100
-       - Consider a team member over-utilized if:
-         * They complete more story points than their capacity, only consider the story points completed during the sprint. Do not consider the story points completed before the sprint start date and after the sprint end date. The story must be marked as done during the sprint.
-       - Consider a team member under-utilized if:
-         * They handle less story points than their capacity, only consider the story points completed during the sprint. Do not consider the story points completed before the sprint start date and after the sprint end date. The story must be marked as done during the sprint.
-       - Analyze workload distribution
-       - Suggest optimal resource allocation
+       For each team member:
+       a) Calculate completed story points:
+          - Look at each story assigned to the member
+          - Check the story's changelog for status changes
+          - Only count story points if:
+            * The story was marked as "Done" during the sprint period
+            * The status change to "Done" occurred between sprint start and end dates
+            * The story was assigned to the member at the time of completion
+          - Do not count story points if:
+            * The story was completed before sprint start
+            * The story was completed after sprint end
+            * The story was completed by a different assignee
+            * The story was not assigned to anyone
+       
+       b) Calculate utilization:
+          - Get the member's capacity from team_members data
+          - Calculate utilization as: (completed story points / capacity) * 100
+          - Consider over-utilized if utilization > 100%
+          - Consider under-utilized if utilization < 70%
+       
+       c) Analyze workload distribution:
+          - Compare utilization across team members
+          - Identify any significant imbalances
+          - Consider story point distribution
+          - Look for patterns in story assignments
     
     4. Additional Improvement Areas
        - Identify any other patterns or issues
@@ -985,7 +1014,10 @@ def generate_improvement_areas(structured_data, sprint_data):
         ]
     }}
     
-    Important: Return ONLY the JSON object, with no additional text or explanation.
+    Important: 
+    - For team utilization, only count story points for stories completed during the sprint by the assigned member
+    - Check changelog entries to verify completion dates and assignees
+    - Return ONLY the JSON object, with no additional text or explanation
     """
     
     response = model.generate_content(prompt)
@@ -1387,28 +1419,11 @@ def generate_combined_sprint_doc(sprint_data, improvement_areas, subgoals, story
         if story_numbers and improvements.get('improvement_areas'):
             doc.add_heading('Improvement Areas', level=4)
             
-            # Group improvements by category
-            improvements_by_category = {}
-            for imp in improvements['improvement_areas']:
-                category = imp['category']
-                if category not in improvements_by_category:
-                    improvements_by_category[category] = []
-                improvements_by_category[category].append(imp)
-            
-            # Add improvements by category
-            for category, category_improvements in improvements_by_category.items():
-                doc.add_heading(category, level=5)
-                for imp in category_improvements:
-                    p = doc.add_paragraph()
-                    p.add_run('Observation: ').bold = True
-                    p.add_run(imp['observation'])
-                    p = doc.add_paragraph()
-                    p.add_run('Impact: ').bold = True
-                    p.add_run(imp['impact'])
-                    p = doc.add_paragraph()
-                    p.add_run('Recommendation: ').bold = True
-                    p.add_run(imp['recommendation'])
-                    doc.add_paragraph()  # Add spacing between improvements
+            # Add improvements as bullet points
+            for improvement in improvements['improvement_areas']:
+                p = doc.add_paragraph()
+                p.style = 'List Bullet'
+                p.add_run(improvement)
         
         # Add a small space between subgoals
         doc.add_paragraph()
@@ -1581,8 +1596,8 @@ def generate_combined_report():
                 improvement_areas,
                 subgoals,
                 story_assignments,
-                achievements,
-                structured_data
+                    achievements,
+                    structured_data
             )
         except Exception as doc_error:
             print(f"Error in generate_combined_sprint_doc: {str(doc_error)}")

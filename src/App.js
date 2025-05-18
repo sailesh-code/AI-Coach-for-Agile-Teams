@@ -8,35 +8,42 @@ import {
   Box,
   Card,
   CardContent,
-  Divider,
   List,
   ListItem,
   ListItemText,
   ListItemIcon,
-  Stack,
-  useTheme,
+  Grid,
   FormControl,
   InputLabel,
   Select,
   MenuItem,
-  Grid,
-  Tabs,
-  Tab
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
+  Stepper,
+  Step,
+  StepLabel,
+  Alert
 } from '@mui/material';
-import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import WarningIcon from '@mui/icons-material/Warning';
+import TrendingUpIcon from '@mui/icons-material/TrendingUp';
+import LightbulbIcon from '@mui/icons-material/Lightbulb';
+import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import axios from 'axios';
-import SprintAnalysis from './components/SprintAnalysis';
 
 function App() {
-  const theme = useTheme();
   const [loading, setLoading] = useState(false);
-  const [sprintData, setSprintData] = useState(null);
   const [error, setError] = useState(null);
   const [boards, setBoards] = useState([]);
   const [sprints, setSprints] = useState([]);
   const [selectedBoard, setSelectedBoard] = useState('');
   const [selectedSprint, setSelectedSprint] = useState('');
-  const [activeTab, setActiveTab] = useState(0);
+  const [file, setFile] = useState(null);
+  const [activeStep, setActiveStep] = useState(0);
+  const [analysisResult, setAnalysisResult] = useState(null);
+
+  const steps = ['Select Board & Sprint', 'Upload Excel File', 'Generate Report'];
 
   useEffect(() => {
     fetchBoards();
@@ -75,7 +82,24 @@ function App() {
     }
   };
 
-  const fetchSprintReport = async () => {
+  const handleFileChange = (event) => {
+    const selectedFile = event.target.files[0];
+    if (selectedFile && selectedFile.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
+      setFile(selectedFile);
+      setError(null);
+      setActiveStep(1);
+    } else {
+      setError('Please select a valid Excel file (.xlsx)');
+      setFile(null);
+    }
+  };
+
+  const handleGenerateReport = async () => {
+    if (!file) {
+      setError('Please select a file first');
+      return;
+    }
+
     if (!selectedBoard || !selectedSprint) {
       setError('Please select both a board and a sprint');
       return;
@@ -83,269 +107,246 @@ function App() {
 
     setLoading(true);
     setError(null);
+    setActiveStep(2);
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('boardId', selectedBoard);
+    formData.append('sprintId', selectedSprint);
+
     try {
-      const response = await axios.get(`http://localhost:5000/api/sprint-report?boardId=${selectedBoard}&sprintId=${selectedSprint}`);
-      setSprintData(response.data);
+      const response = await axios.post('http://localhost:5000/api/sprint-combined-report', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+        responseType: 'blob'
+      });
+
+      // Create a download link
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `sprint_report_and_analysis_${selectedSprint}.docx`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      
+      // Reset the form
+      setFile(null);
+      setActiveStep(0);
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to fetch sprint report');
+      setError(err.response?.data?.error || 'Failed to generate report');
+      setActiveStep(1);
     } finally {
       setLoading(false);
     }
   };
 
-  const renderAchievements = (achievements, storyAssignments) => {
-    if (!achievements) return null;
+  const renderSpillOverAnalysis = (data) => (
+    <Box>
+      <Typography variant="h6" gutterBottom>
+        Spilled Stories
+      </Typography>
+      <List>
+        {data.spilled_stories.map((story, index) => (
+          <ListItem key={index}>
+            <ListItemIcon>
+              <WarningIcon color="error" />
+            </ListItemIcon>
+            <ListItemText
+              primary={story.story_id}
+              secondary={
+                <>
+                  <Typography component="span" variant="body2" color="text.primary">
+                    Reason: {story.reason}
+                  </Typography>
+                  <br />
+                  <Typography component="span" variant="body2" color="text.secondary">
+                    Prevention: {story.prevention_suggestion}
+                  </Typography>
+                </>
+              }
+            />
+          </ListItem>
+        ))}
+      </List>
+      <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
+        Root Causes
+      </Typography>
+      <List>
+        {data.root_causes.map((cause, index) => (
+          <ListItem key={index}>
+            <ListItemText primary={cause} />
+          </ListItem>
+        ))}
+      </List>
+      <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
+        Recommendations
+      </Typography>
+      <List>
+        {data.recommendations.map((rec, index) => (
+          <ListItem key={index}>
+            <ListItemText primary={rec} />
+          </ListItem>
+        ))}
+      </List>
+    </Box>
+  );
 
-    const assignmentSections = storyAssignments.split('\n\n').filter(section => section.trim());
-    const storyMappings = {};
-    
-    assignmentSections.forEach(section => {
-      const [title, ...stories] = section.split('\n');
-      storyMappings[title] = stories.map(story => {
-        const match = story.trim().match(/^- (.*?): (.*)$/);
-        return match ? { key: match[1], summary: match[2] } : null;
-      }).filter(Boolean);
-    });
+  const renderChurnAnalysis = (data) => (
+    <Box>
+      <Typography variant="h6" gutterBottom>
+        High Churn Stories
+      </Typography>
+      <List>
+        {data.high_churn_stories.map((story, index) => (
+          <ListItem key={index}>
+            <ListItemIcon>
+              <TrendingUpIcon color="warning" />
+            </ListItemIcon>
+            <ListItemText
+              primary={story.story_id}
+              secondary={
+                <>
+                  <Typography component="span" variant="body2" color="text.primary">
+                    Churn Count: {story.churn_count}
+                  </Typography>
+                  <br />
+                  <Typography component="span" variant="body2" color="text.secondary">
+                    Impact: {story.impact}
+                  </Typography>
+                </>
+              }
+            />
+          </ListItem>
+        ))}
+      </List>
+      <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
+        Velocity Impact
+      </Typography>
+      <Typography paragraph>{data.velocity_impact}</Typography>
+      <Typography variant="h6" gutterBottom>
+        Reduction Suggestions
+      </Typography>
+      <List>
+        {data.reduction_suggestions.map((suggestion, index) => (
+          <ListItem key={index}>
+            <ListItemText primary={suggestion} />
+          </ListItem>
+        ))}
+      </List>
+    </Box>
+  );
 
-    const sections = achievements.split('\n\n').filter(section => section.trim());
-    
-    return (
-      <Stack spacing={3}>
-        {sections.map((section, index) => {
-          const [title, firstAchievement, ...remainingAchievements] = section.split('\n');
-          const assignedStories = storyMappings[title] || [];
-          
-          // Filter out empty achievements
-          const filteredAchievements = remainingAchievements.filter(achievement => 
-            achievement.trim() && achievement.trim() !== '-'
-          );
-          
-          return (
-            <Box 
-              key={index}
-              sx={{
-                p: 3,
-                borderRadius: 2,
-                backgroundColor: 'rgba(0, 0, 0, 0.02)',
-                transition: 'all 0.2s ease-in-out',
-                '&:hover': {
-                  backgroundColor: 'rgba(0, 0, 0, 0.04)',
-                  transform: 'translateY(-2px)',
-                  boxShadow: '0 4px 20px rgba(0,0,0,0.1)'
-                }
-              }}
-            >
-              <Typography 
-                variant="h6" 
-                gutterBottom 
-                sx={{ 
-                  color: 'primary.main',
-                  fontWeight: 'bold',
-                  background: `linear-gradient(45deg, ${theme.palette.primary.main}, ${theme.palette.primary.light})`,
-                  WebkitBackgroundClip: 'text',
-                  WebkitTextFillColor: 'transparent',
-                  mb: 2
-                }}
-              >
-                {title}
+  const renderTeamUtilization = (data) => (
+    <Box>
+      <Typography variant="h6" gutterBottom>
+        Team Utilization
+      </Typography>
+      <Grid container spacing={2}>
+        <Grid item xs={12} md={6}>
+          <Card>
+            <CardContent>
+              <Typography variant="subtitle1" gutterBottom>
+                Over-utilized Members
               </Typography>
-              
-              <Typography 
-                variant="subtitle1" 
-                sx={{ 
-                  color: 'text.secondary',
-                  fontStyle: 'italic',
-                  mb: 3,
-                  pl: 2,
-                  borderLeft: `3px solid ${theme.palette.primary.main}`,
-                  py: 1
-                }}
-              >
-                {firstAchievement?.trim().replace('- ', '')}
+              <List>
+                {data.over_utilized.map((member, index) => (
+                  <ListItem key={index}>
+                    <ListItemText
+                      primary={member.member}
+                      secondary={`Utilization: ${member.utilization}%`}
+                    />
+                  </ListItem>
+                ))}
+              </List>
+            </CardContent>
+          </Card>
+        </Grid>
+        <Grid item xs={12} md={6}>
+          <Card>
+            <CardContent>
+              <Typography variant="subtitle1" gutterBottom>
+                Under-utilized Members
               </Typography>
-
-              <List sx={{ py: 0 }}>
-                {filteredAchievements.map((achievement, achievementIndex) => {
-                  const achievementText = achievement.trim().replace('- ', '');
-                  return (
-                    <ListItem 
-                      key={achievementIndex} 
-                      sx={{ 
-                        py: 1,
-                        pl: 2,
-                        transition: 'all 0.2s ease-in-out',
-                        '&:hover': {
-                          backgroundColor: 'rgba(0, 0, 0, 0.02)',
-                          transform: 'translateX(8px)'
-                        }
-                      }}
-                    >
-                      <ListItemIcon sx={{ minWidth: 32 }}>
-                        <CheckCircleOutlineIcon 
-                          color="primary" 
-                          sx={{ 
-                            fontSize: '1.2rem',
-                            filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.1))'
-                          }} 
-                        />
-                      </ListItemIcon>
+              <List>
+                {data.under_utilized.map((member, index) => (
+                  <ListItem key={index}>
                       <ListItemText 
-                        primary={achievementText}
-                        primaryTypographyProps={{
-                          variant: 'body2',
-                          color: 'text.primary',
-                          sx: { lineHeight: 1.6 }
-                        }}
+                      primary={member.member}
+                      secondary={`Utilization: ${member.utilization}%`}
                       />
                     </ListItem>
-                  );
-                })}
+                ))}
               </List>
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+      <Typography variant="h6" gutterBottom sx={{ mt: 2 }}>
+        Workload Distribution
+      </Typography>
+      <Typography paragraph>{data.workload_distribution}</Typography>
+      <Typography variant="h6" gutterBottom>
+        Optimization Suggestions
+      </Typography>
+      <List>
+        {data.optimization_suggestions.map((suggestion, index) => (
+          <ListItem key={index}>
+            <ListItemText primary={suggestion} />
+          </ListItem>
+        ))}
+      </List>
+    </Box>
+  );
 
-              {assignedStories.length > 0 && (
-                <Box sx={{ mt: 3, pl: 2 }}>
-                  <Typography 
-                    variant="subtitle2" 
-                    sx={{ 
-                      color: 'text.secondary',
-                      fontWeight: 'medium',
-                      mb: 2,
-                      textTransform: 'uppercase',
-                      letterSpacing: '1px'
-                    }}
-                  >
-                    Assigned Stories
+  const renderAdditionalImprovements = (data) => (
+    <Box>
+      <Typography variant="h6" gutterBottom>
+        Additional Improvements
+      </Typography>
+      <List>
+        {data.map((improvement, index) => (
+          <ListItem key={index}>
+            <ListItemIcon>
+              <LightbulbIcon color="primary" />
+            </ListItemIcon>
+            <ListItemText
+              primary={improvement.area}
+              secondary={
+                <>
+                  <Typography component="span" variant="body2" color="text.primary">
+                    Observation: {improvement.observation}
                   </Typography>
-                  <List sx={{ py: 0 }}>
-                    {assignedStories.map((story, storyIndex) => (
-                      <ListItem 
-                        key={storyIndex} 
-                        sx={{ 
-                          py: 1,
-                          pl: 2,
-                          mb: 1,
-                          borderRadius: 2,
-                          transition: 'all 0.2s ease-in-out',
-                          '&:hover': {
-                            backgroundColor: 'rgba(0, 0, 0, 0.02)',
-                            transform: 'translateX(8px)'
-                          }
-                        }}
-                      >
-                        <ListItemText 
-                          primary={
-                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-                              <Typography
-                                sx={{ 
-                                  fontFamily: 'monospace',
-                                  fontSize: '0.8rem',
-                                  color: 'primary.main',
-                                  letterSpacing: '0.5px'
-                                }}
-                              >
-                                {story.key}
+                  <br />
+                  <Typography component="span" variant="body2" color="text.secondary">
+                    Suggestion: {improvement.suggestion}
                               </Typography>
-                              <Typography
-                                variant="body2"
-                                color="text.secondary"
-                                sx={{ lineHeight: 1.4 }}
-                              >
-                                {story.summary}
-                              </Typography>
-                            </Box>
+                </>
                           }
                         />
                       </ListItem>
                     ))}
                   </List>
                 </Box>
-              )}
-            </Box>
-          );
-        })}
-      </Stack>
     );
-  };
-
-  const handleTabChange = (event, newValue) => {
-    setActiveTab(newValue);
-  };
 
   return (
-    <Container maxWidth="md" sx={{ py: 6 }}>
-      <Paper 
-        elevation={3} 
-        sx={{ 
-          p: 4, 
-          mb: 4, 
-          borderRadius: 3,
-          background: `linear-gradient(135deg, ${theme.palette.background.paper} 0%, ${theme.palette.background.default} 100%)`,
-          boxShadow: '0 8px 32px rgba(0,0,0,0.1)'
-        }}
-      >
-        <Typography 
-          variant="h4" 
-          component="h1" 
-          gutterBottom 
-          sx={{ 
-            color: 'primary.main',
-            fontWeight: 'bold',
-            background: `linear-gradient(45deg, ${theme.palette.primary.main}, ${theme.palette.primary.light})`,
-            WebkitBackgroundClip: 'text',
-            WebkitTextFillColor: 'transparent',
-            mb: 2
-          }}
-        >
-          Sprint Report Generator
+    <Container maxWidth="lg" sx={{ py: 4 }}>
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h4" gutterBottom align="center">
+          Sprint Analysis Report
         </Typography>
 
-        <Tabs 
-          value={activeTab} 
-          onChange={handleTabChange} 
-          sx={{ mb: 3 }}
-          indicatorColor="primary"
-          textColor="primary"
-        >
-          <Tab label="Sprint Report" />
-          <Tab label="Sprint Analysis" />
-        </Tabs>
-
-        {activeTab === 0 ? (
-          <>
-            <Typography 
-              variant="body1" 
-              color="text.secondary" 
-              paragraph
-              sx={{ 
-                fontSize: '1.1rem',
-                lineHeight: 1.6,
-                mb: 3
-              }}
-            >
-              Generate a detailed report of the last closed sprint, including AI-generated subgoals and story assignments.
-            </Typography>
-
-            <Grid container spacing={2} sx={{ mb: 3 }}>
+        <Box sx={{ mb: 3 }}>
+          <Grid container spacing={2}>
               <Grid item xs={12} md={6}>
-                <FormControl 
-                  fullWidth 
-                  sx={{ 
-                    '& .MuiOutlinedInput-root': {
-                      borderRadius: 2,
-                      backgroundColor: 'rgba(255, 255, 255, 0.9)',
-                      '&:hover': {
-                        backgroundColor: 'rgba(255, 255, 255, 1)',
-                      },
-                    }
-                  }}
-                >
-                  <InputLabel id="board-select-label">Select Board</InputLabel>
+              <FormControl fullWidth>
+                <InputLabel>Board</InputLabel>
                   <Select
-                    labelId="board-select-label"
-                    id="board-select"
                     value={selectedBoard}
-                    label="Select Board"
                     onChange={(e) => setSelectedBoard(e.target.value)}
+                  label="Board"
                   >
                     {boards.map((board) => (
                       <MenuItem key={board.id} value={board.id}>
@@ -356,173 +357,114 @@ function App() {
                 </FormControl>
               </Grid>
               <Grid item xs={12} md={6}>
-                <FormControl 
-                  fullWidth 
-                  sx={{ 
-                    '& .MuiOutlinedInput-root': {
-                      borderRadius: 2,
-                      backgroundColor: 'rgba(255, 255, 255, 0.9)',
-                      '&:hover': {
-                        backgroundColor: 'rgba(255, 255, 255, 1)',
-                      },
-                    }
-                  }}
-                >
-                  <InputLabel id="sprint-select-label">Select Sprint</InputLabel>
+              <FormControl fullWidth>
+                <InputLabel>Sprint</InputLabel>
                   <Select
-                    labelId="sprint-select-label"
-                    id="sprint-select"
                     value={selectedSprint}
-                    label="Select Sprint"
                     onChange={(e) => setSelectedSprint(e.target.value)}
-                    disabled={!selectedBoard}
+                  label="Sprint"
                   >
                     {sprints.map((sprint) => (
                       <MenuItem key={sprint.id} value={sprint.id}>
-                        {sprint.name} ({new Date(sprint.startDate).toLocaleDateString()} - {new Date(sprint.endDate).toLocaleDateString()})
+                      {sprint.name}
                       </MenuItem>
                     ))}
                   </Select>
                 </FormControl>
               </Grid>
             </Grid>
+        </Box>
 
-            <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
+        {error && (
+          <Alert severity="error" sx={{ mb: 3 }}>
+            {error}
+          </Alert>
+        )}
+
+        <Box>
+          <Stepper activeStep={activeStep} sx={{ mb: 3 }}>
+            {steps.map((label) => (
+              <Step key={label}>
+                <StepLabel>{label}</StepLabel>
+              </Step>
+            ))}
+          </Stepper>
+
+          <Box sx={{ mb: 3 }}>
+            <input
+              accept=".xlsx"
+              style={{ display: 'none' }}
+              id="excel-file-upload"
+              type="file"
+              onChange={handleFileChange}
+            />
+            <label htmlFor="excel-file-upload">
               <Button 
                 variant="contained" 
-                onClick={fetchSprintReport}
-                disabled={loading || !selectedBoard || !selectedSprint}
-                sx={{ 
-                  borderRadius: 2,
-                  px: 4,
-                  py: 1.5,
-                  fontSize: '1.1rem',
-                  textTransform: 'none',
-                  boxShadow: '0 4px 14px rgba(0,0,0,0.1)',
-                  transition: 'all 0.2s ease-in-out',
-                  '&:hover': {
-                    transform: 'translateY(-2px)',
-                    boxShadow: '0 6px 20px rgba(0,0,0,0.15)'
-                  }
-                }}
+                component="span"
+                startIcon={<CloudUploadIcon />}
+                disabled={!selectedBoard || !selectedSprint}
               >
-                {loading ? <CircularProgress size={24} /> : 'Generate Report'}
+                Upload Excel File
               </Button>
+            </label>
+            {file && (
+              <Typography variant="body2" sx={{ mt: 1 }}>
+                Selected file: {file.name}
+              </Typography>
+            )}
+          </Box>
 
-              {sprintData && (
                 <Button
-                  variant="outlined"
-                  onClick={() => {
-                    const url = `http://localhost:5000/api/sprint-report/download?boardId=${selectedBoard}&sprintId=${selectedSprint}`;
-                    window.open(url, '_blank');
-                  }}
-                  sx={{
-                    borderRadius: 2,
-                    px: 4,
-                    py: 1.5,
-                    fontSize: '1.1rem',
-                    textTransform: 'none',
-                    borderWidth: 2,
-                    '&:hover': {
-                      borderWidth: 2,
-                      transform: 'translateY(-2px)',
-                      boxShadow: '0 6px 20px rgba(0,0,0,0.1)'
-                    }
-                  }}
-                >
-                  Download Word Document
+            variant="contained"
+            onClick={handleGenerateReport}
+            disabled={loading || !file || !selectedBoard || !selectedSprint}
+            sx={{ mb: 3 }}
+          >
+            {loading ? <CircularProgress size={24} /> : 'Generate Analysis Report'}
                 </Button>
-              )}
+
+          {analysisResult && (
+            <Box>
+              <Accordion>
+                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                  <Typography variant="h6">Spill-over Analysis</Typography>
+                </AccordionSummary>
+                <AccordionDetails>
+                  {renderSpillOverAnalysis(analysisResult.spill_over_analysis)}
+                </AccordionDetails>
+              </Accordion>
+
+              <Accordion>
+                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                  <Typography variant="h6">Churn Analysis</Typography>
+                </AccordionSummary>
+                <AccordionDetails>
+                  {renderChurnAnalysis(analysisResult.churn_analysis)}
+                </AccordionDetails>
+              </Accordion>
+
+              <Accordion>
+                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                  <Typography variant="h6">Team Utilization</Typography>
+                </AccordionSummary>
+                <AccordionDetails>
+                  {renderTeamUtilization(analysisResult.team_utilization)}
+                </AccordionDetails>
+              </Accordion>
+
+              <Accordion>
+                <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                  <Typography variant="h6">Additional Improvements</Typography>
+                </AccordionSummary>
+                <AccordionDetails>
+                  {renderAdditionalImprovements(analysisResult.additional_improvements)}
+                </AccordionDetails>
+              </Accordion>
             </Box>
-          </>
-        ) : (
-          <SprintAnalysis />
         )}
+        </Box>
       </Paper>
-
-      {error && (
-        <Paper 
-          elevation={3} 
-          sx={{ 
-            p: 3, 
-            mb: 4, 
-            bgcolor: '#ffebee', 
-            borderRadius: 2,
-            border: '1px solid #ffcdd2'
-          }}
-        >
-          <Typography color="error">{error}</Typography>
-        </Paper>
-      )}
-
-      {sprintData && activeTab === 0 && (
-        <Card 
-          elevation={3} 
-          sx={{ 
-            borderRadius: 3,
-            overflow: 'hidden',
-            boxShadow: '0 8px 32px rgba(0,0,0,0.1)'
-          }}
-        >
-          <CardContent sx={{ p: 4 }}>
-            <Typography 
-              variant="h5" 
-              gutterBottom 
-              sx={{ 
-                color: 'primary.main',
-                fontWeight: 'bold',
-                background: `linear-gradient(45deg, ${theme.palette.primary.main}, ${theme.palette.primary.light})`,
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                mb: 1
-              }}
-            >
-              {sprintData.sprint_name}
-            </Typography>
-            <Typography 
-              variant="subtitle1" 
-              color="text.secondary" 
-              gutterBottom
-              sx={{ mb: 4 }}
-            >
-              {new Date(sprintData.start_date).toLocaleDateString()} - {new Date(sprintData.end_date).toLocaleDateString()}
-            </Typography>
-            
-            <Box sx={{ my: 4 }}>
-              <Typography 
-                variant="h6" 
-                gutterBottom 
-                sx={{ 
-                  color: 'primary.main',
-                  fontWeight: 'bold',
-                  mb: 2
-                }}
-              >
-                Sprint Goal
-              </Typography>
-              <Typography 
-                variant="body1" 
-                paragraph 
-                sx={{ 
-                  color: 'text.primary',
-                  fontWeight: 500,
-                  fontSize: '1.1rem',
-                  lineHeight: 1.6,
-                  p: 2,
-                  borderRadius: 2,
-                  backgroundColor: 'rgba(0, 0, 0, 0.02)'
-                }}
-              >
-                {sprintData.sprint_goal}
-              </Typography>
-            </Box>
-
-            <Divider sx={{ my: 4 }} />
-
-            {renderAchievements(sprintData.achievements, sprintData.story_assignments)}
-          </CardContent>
-        </Card>
-      )}
     </Container>
   );
 }
